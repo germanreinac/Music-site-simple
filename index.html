@@ -5,13 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Fart Harp</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Titan+One&family=Patrick+Hand&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Londrina+Solid:wght@900&family=Patrick+Hand&display=swap">
 <style>
   /* Layout: the word fills the whole screen like harp strings. Two colours only, and they trade places as you play. */
   :root {
     --bg: #ffffff;              /* swapped with --fg by the script on every pluck */
     --fg: #e3120b;
-    --display: "Titan One", "Arial Rounded MT Bold", Impact, sans-serif;
+    --display: "Londrina Solid", "Arial Rounded MT Bold", Impact, sans-serif;
     --hand: "Patrick Hand", "Comic Sans MS", "Segoe Print", cursive;
     color-scheme: light;
   }
@@ -21,13 +21,13 @@
     background: var(--bg);
     color: var(--fg);
     font-family: var(--hand);
-    font-size: 1.1rem;
+    font-size: 0.95rem;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.4rem;
+    gap: 0.2rem;
     box-sizing: border-box;
-    padding-block: 0.5rem;
+    padding-block: 0.25rem;
     padding-left: max(16px, env(safe-area-inset-left, 0px));
     padding-right: max(16px, env(safe-area-inset-right, 0px));
     overflow: hidden;
@@ -62,7 +62,7 @@
     background: var(--bg);
     border: 2px solid var(--fg);
     border-radius: 0.6rem;
-    padding: 0.05rem 0.6rem;
+    padding: 0 0.5rem;
     width: 9ch;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -73,7 +73,7 @@
 </style>
 </head>
 <body>
-<p id="hint">Tap once to turn the sound on, then strum across the letters</p>
+<p id="hint">Tap once for sound. Strum across the letters, or grab one and pull</p>
 <div id="stage"><canvas id="harp" aria-label="A word whose letters play like harp strings"></canvas></div>
 <label class="word" for="word-input">Word
   <input id="word-input" type="text" value="TRUMP" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false">
@@ -167,7 +167,7 @@
   function onAwake() {
     if (awake || !ac || ac.state !== 'running') return;
     awake = true;
-    hint.textContent = 'Strum across the letters';
+    hint.hidden = true;          // give the letters the whole screen
     fart(130.8, 0.5, 0.6);       // so you can hear that sound is on
   }
 
@@ -259,7 +259,7 @@
     if (!chars.length) { draw(); return; }
 
     const FS = 200;
-    const font = `${FS}px "Titan One", "Arial Rounded MT Bold", Impact, sans-serif`;
+    const font = `900 ${FS}px "Londrina Solid", "Arial Rounded MT Bold", Impact, sans-serif`;
     ctx.font = font;
     const metrics = chars.map(c => {
       const m = ctx.measureText(c);
@@ -273,7 +273,7 @@
     const rel = metrics.map(m => Math.min(1.3, Math.max(0.6, m.w / avg)));
     const relSum = rel.reduce((s, r) => s + r, 0);
 
-    const padX = W * 0.04, padY = H * 0.015;
+    const padX = W * 0.03, padY = H * 0.004;
     const gap = W * 0.02;
     const innerW = W - padX * 2 - gap * (chars.length - 1);
     const innerH = H - padY * 2;
@@ -282,7 +282,7 @@
 
     chars.forEach((ch, i) => {
       const cw = innerW * rel[i] / relSum;
-      const chh = innerH * (0.93 + 0.07 * seeded(i, 1));
+      const chh = innerH * (0.965 + 0.035 * seeded(i, 1));
       const y = padY + (innerH - chh) * seeded(i, 2);
       const g = metrics[i];
       const ow = Math.ceil(cw + m * 2), oh = Math.ceil(chh + m * 2);
@@ -297,7 +297,7 @@
 
       const prev = old[i] && old[i].ch === ch ? old[i] : null;
       letters.push({
-        ch, freq: freqFor(ch), x, y, w: cw, h: chh, m, ow, oh, mask,
+        ch, freq: freqFor(ch), x, y, w: cw, h: chh, m, ow, oh, mask, held: null,
         mx: prev ? prev.mx : MODES.map(() => 0),
         mv: prev ? prev.mv : MODES.map(() => 0)
       });
@@ -307,31 +307,53 @@
   }
 
   /* ---------- drawing ---------- */
+  const SHUTTER = 0.024;   // seconds of movement smeared into each frame
+
   function draw() {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
     ctx.clearRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
     const step = Math.max(2, Math.round(dpr * 1.5));
     for (const L of letters) {
       const x0 = L.x - L.m, y0 = L.y - L.m;
-      if (!L.mx.some(v => v)) { ctx.drawImage(L.mask, x0, y0); continue; }
+      const moving = L.mx.some(v => v) || L.mv.some(v => v);
+      if (!moving && !L.held) { ctx.globalAlpha = 1; ctx.drawImage(L.mask, x0, y0); continue; }
+      // faster letters get more smear samples
+      const smear = L.mv.reduce((s, v) => s + Math.abs(v), 0) * SHUTTER;
+      const S = smear < 1.5 * dpr ? 1 : smear < 9 * dpr ? 3 : 5;
+      ctx.globalAlpha = 1 / S;
+      const pull = L.held ? L.held.pull : 0, hp = L.held ? L.held.py : 0.5;
       for (let sy = 0; sy < L.oh; sy += step) {
         const t = Math.min(1, Math.max(0, (sy + step / 2 - L.m) / L.h));
-        let dx = 0;
-        for (let k = 0; k < MODES.length; k++) dx += L.mx[k] * Math.sin(MODES[k].n * Math.PI * t);
+        let dx = pull * (t < hp ? t / hp : (1 - t) / (1 - hp)), vx = 0;
+        for (let k = 0; k < MODES.length; k++) {
+          const sn = Math.sin(MODES[k].n * Math.PI * t);
+          dx += L.mx[k] * sn;
+          vx += L.mv[k] * sn;
+        }
         const sh = Math.min(step, L.oh - sy);
-        ctx.drawImage(L.mask, 0, sy, L.ow, sh, x0 + dx, y0 + sy, L.ow, sh);
+        for (let j = 0; j < S; j++) {
+          const off = S === 1 ? 0 : vx * SHUTTER * (j / (S - 1) - 0.5);
+          ctx.drawImage(L.mask, 0, sy, L.ow, sh, x0 + dx + off, y0 + sy, L.ow, sh);
+        }
       }
     }
     // paint every letter in the current word colour
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-in';
     ctx.fillStyle = `rgb(${fgNow.join(',')})`;
     ctx.fillRect(0, 0, W, H);
   }
 
   function applyColours() {
-    const bg = WHITE.map((w, i) => Math.round(w + (RED[i] - w) * mix));
-    fgNow = mix < 0.5 ? RED : WHITE;
+    // a pulled string leans the page toward the other colour before it lets go
+    let tension = 0;
+    for (const L of letters) if (L.held) tension = Math.max(tension, Math.abs(L.held.pull) / maxPull(L));
+    const shown = mix + (flipped ? -1 : 1) * 0.38 * tension;
+    const bg = WHITE.map((w, i) => Math.round(w + (RED[i] - w) * shown));
+    fgNow = shown < 0.5 ? RED : WHITE;
     root.style.setProperty('--bg', `rgb(${bg.join(',')})`);
     root.style.setProperty('--fg', `rgb(${fgNow.join(',')})`);
   }
@@ -344,10 +366,11 @@
     if (mix !== flipped) {
       mix += (flipped - mix) * (1 - Math.exp(-dt * 11));
       if (Math.abs(flipped - mix) < 0.004) mix = flipped; else alive = true;
-      applyColours();
     }
+    applyColours();
 
     for (const L of letters) {
+      if (L.held) alive = true;
       for (let k = 0; k < MODES.length; k++) {
         const M = MODES[k];
         let x = L.mx[k], v = L.mv[k];
@@ -372,21 +395,50 @@
   }
 
   /* ---------- playing ---------- */
-  function pluck(L, dir, strength, ty) {
-    const py = Math.min(0.88, Math.max(0.12, ty));
-    const amp = L.w * (0.22 + 0.5 * strength);
+  function maxPull(L) { return Math.max(L.w * 1.15, 44 * dpr); }
+
+  function kick(L, dir, amp, py) {
     for (let k = 0; k < MODES.length; k++) {
       const M = MODES[k];
       const weight = Math.sin(M.n * Math.PI * py) / Math.pow(M.n, 0.45);
       const cap = M.omega * L.w * 0.55;
       L.mv[k] = Math.max(-cap, Math.min(cap, L.mv[k] + dir * M.omega * amp * weight));
     }
-    flipped = flipped ? 0 : 1;      // the two colours trade places on every note
-    fart(L.freq, strength, 1 - py);
+  }
+
+  // Every note: the two colours trade places, the letter farts, its neighbours shiver.
+  function sound(L, dir, strength, py) {
+    flipped = flipped ? 0 : 1;
+    const octave = py < 0.33 ? 2 : 1;          // the top third of a letter plays an octave up
+    fart(L.freq * octave, strength, 1 - py);
+    const i = letters.indexOf(L);
+    for (const N of [letters[i - 1], letters[i + 1]]) {
+      if (N && !N.held) kick(N, dir, N.w * 0.09 * (0.4 + strength), py);
+    }
     wake();
   }
 
-  let last = null;   // previous pointer position in canvas pixels
+  function pluck(L, dir, strength, ty) {
+    const py = Math.min(0.88, Math.max(0.12, ty));
+    kick(L, dir, L.w * (0.22 + 0.5 * strength), py);
+    sound(L, dir, strength, py);
+  }
+
+  // Let go of a pulled letter: its bent shape becomes the starting point of the vibration.
+  function release(L) {
+    const h = L.held;
+    if (!h) return;
+    L.held = null;
+    if (Math.abs(h.pull) < 5 * dpr) { pluck(L, h.side, 0.6, h.py); return; }
+    for (let k = 0; k < MODES.length; k++) {
+      const n = MODES[k].n;
+      L.mx[k] = h.pull * 2 * Math.sin(n * Math.PI * h.py) / (n * n * Math.PI * Math.PI * h.py * (1 - h.py));
+      L.mv[k] = 0;
+    }
+    sound(L, h.pull > 0 ? -1 : 1, Math.min(1, 0.25 + 0.75 * Math.abs(h.pull) / maxPull(L)), h.py);
+  }
+
+  const pointers = new Map();   // one entry per finger (or the mouse)
   function toCanvas(e) {
     const r = canvas.getBoundingClientRect();
     return { x: (e.clientX - r.left) * dpr, y: (e.clientY - r.top) * dpr, t: e.timeStamp };
@@ -397,28 +449,60 @@
 
   window.addEventListener('pointermove', e => {
     const p = toCanvas(e);
+    let rec = pointers.get(e.pointerId);
+    if (!rec) { rec = { last: null, grab: null, gx: 0 }; pointers.set(e.pointerId, rec); }
+    const last = rec.last;
+    rec.last = p;
+
+    if (rec.grab) {
+      const L = rec.grab;
+      if (!L.held) rec.grab = null;
+      else {
+        L.held.pull = p.x - rec.gx;
+        if (Math.abs(L.held.pull) > maxPull(L)) {      // pulled too far: it slips off the finger
+          L.held.pull = Math.sign(L.held.pull) * maxPull(L);
+          release(L);
+          rec.grab = null;
+        } else wake();
+        return;
+      }
+    }
     if (last && p.t - last.t < 250) {
       const speed = Math.abs(p.x - last.x) / dpr / Math.max(1, p.t - last.t);   // css px per ms
       const strength = Math.min(1, Math.max(0.15, speed / 2.2));
       const dir = p.x > last.x ? 1 : -1;
       const hit = letters.filter(L => {
         const cx = L.x + L.w / 2;
-        return (last.x - cx) * (p.x - cx) < 0 && inColumn(L, p.y);
+        return !L.held && (last.x - cx) * (p.x - cx) < 0 && inColumn(L, p.y);
       });
       if (dir < 0) hit.reverse();
       for (const L of hit) pluck(L, dir, strength, (p.y - L.y) / L.h);
     }
-    last = p;
   });
 
+  // Press on a letter to grab it, drag sideways to pull it, let go to twang it.
   stage.addEventListener('pointerdown', e => {
     const p = toCanvas(e);
-    last = p;
-    const L = letters.find(L => p.x >= L.x && p.x <= L.x + L.w && inColumn(L, p.y));
-    if (L) pluck(L, p.x < L.x + L.w / 2 ? 1 : -1, 0.6, (p.y - L.y) / L.h);
+    const rec = { last: p, grab: null, gx: p.x };
+    pointers.set(e.pointerId, rec);
+    const L = letters.find(L => !L.held && p.x >= L.x && p.x <= L.x + L.w && inColumn(L, p.y));
+    if (!L) return;
+    L.mx.fill(0); L.mv.fill(0);
+    L.held = {
+      pull: 0, side: p.x < L.x + L.w / 2 ? 1 : -1,
+      py: Math.min(0.88, Math.max(0.12, (p.y - L.y) / L.h))
+    };
+    rec.grab = L;
+    wake();
   });
-  window.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') last = null; });
-  window.addEventListener('pointercancel', () => { last = null; });
+  function lift(e) {
+    const rec = pointers.get(e.pointerId);
+    if (!rec) return;
+    if (rec.grab) { release(rec.grab); rec.grab = null; }
+    if (e.pointerType !== 'mouse') pointers.delete(e.pointerId);
+  }
+  window.addEventListener('pointerup', lift);
+  window.addEventListener('pointercancel', lift);
 
   // iPhones only allow sound to start from the end of a tap, so listen for every kind of gesture.
   for (const type of ['touchend', 'pointerup', 'mousedown', 'click', 'keydown']) {
@@ -442,7 +526,7 @@
   input.addEventListener('input', build);
   new ResizeObserver(build).observe(stage);
   if (document.fonts && document.fonts.load) {
-    document.fonts.load('200px "Titan One"').then(build, () => {});
+    document.fonts.load('900 200px "Londrina Solid"').then(build, () => {});
   }
   applyColours();
   build();
