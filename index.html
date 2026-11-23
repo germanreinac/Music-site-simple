@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fart Harp</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Titan+One&family=Patrick+Hand&display=swap">
+<style>
+  /* Layout: one notebook-sketch card, centred, the word filling it edge to edge like harp strings. */
+  :root {
+    --bg: hsl(46 88% 60%);      /* page colour, replaced by the last note played */
+    --paper: #f6eedd;
+    --ink: #17120e;
+    --ink-soft: rgba(23, 18, 14, 0.72);
+    --display: "Titan One", "Arial Rounded MT Bold", Impact, sans-serif;
+    --hand: "Patrick Hand", "Comic Sans MS", "Segoe Print", cursive;
+    color-scheme: light;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--hand);
+    font-size: 1.25rem;
+    transition: background-color 0.35s ease-out;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    box-sizing: border-box;
+    padding-block: 1rem;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #hint {
+    margin: 0;
+    text-align: center;
+    text-wrap: balance;
+    line-height: 1.2;
+    min-height: 1.2em;
+  }
+  #stage {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #card {
+    background: var(--paper);
+    border: 4px solid var(--ink);
+    border-radius: 9% 11% 8% 12% / 10% 8% 11% 9%;
+    box-shadow: -10px 10px 0 var(--ink);
+    margin-left: 10px;
+    margin-bottom: 10px;
+    overflow: hidden;
+    touch-action: none;
+    cursor: crosshair;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  .word {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: var(--ink-soft);
+  }
+  .word input {
+    font: inherit;
+    color: var(--ink);
+    background: var(--paper);
+    border: 3px solid var(--ink);
+    border-radius: 0.7rem;
+    padding: 0.15rem 0.6rem;
+    width: 9ch;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .word input:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+</style>
+</head>
+<body>
+<p id="hint">Tap once to wake the sound, then strum across the letters</p>
+<div id="stage">
+  <div id="card"><canvas id="harp" aria-label="A word whose letters play like harp strings"></canvas></div>
+</div>
+<label class="word" for="word-input">Word
+  <input id="word-input" type="text" value="TRUMP" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false">
+</label>
+
+<script>
+(() => {
+  const INK = '#17120e';
+  const PENTATONIC = [0, 2, 4, 7, 9];
+  const OMEGA = 2 * Math.PI * 6;      // wobble speed of a plucked letter
+  const K = OMEGA * OMEGA, DAMP = 4.5;
+
+  const stage = document.getElementById('stage');
+  const card = document.getElementById('card');
+  const canvas = document.getElementById('harp');
+  const ctx = canvas.getContext('2d');
+  const hint = document.getElementById('hint');
+  const input = document.getElementById('word-input');
+
+  let letters = [];
+  let W = 0, H = 0, dpr = 1;
+  let running = false, lastT = 0;
+
+  /* ---------- notes ---------- */
+  // Each letter of the alphabet owns a note (two octaves of a pentatonic scale) and a colour.
+  function noteFor(ch) {
+    const code = ch.toUpperCase().charCodeAt(0);
+    const n = (code >= 65 && code <= 90 ? code - 65 : code) % 10;
+    const semi = PENTATONIC[n % 5] + 12 * Math.floor(n / 5);
+    return { freq: 65.41 * Math.pow(2, semi / 12), hue: (n * 36 + 10) % 360 };
+  }
+
+  /* ---------- sound ---------- */
+  let ac = null, master = null, noiseBuf = null, shaperCurve = null;
+
+  function initAudio() {
+    if (!ac) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      ac = new AC();
+      master = ac.createDynamicsCompressor();
+      master.connect(ac.destination);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      shaperCurve = new Float32Array(1024);
+      for (let i = 0; i < 1024; i++) shaperCurve[i] = Math.tanh((i / 511.5 - 1) * 3);
+    }
+    if (ac.state !== 'running') ac.resume().then(soundAwake, () => {});
+    else soundAwake();
+  }
+  function soundAwake() {
+    hint.textContent = 'Strum across the letters';
+  }
+
+  // A fart: a buzzy low saw that sags in pitch, with noise wobbling its pitch and volume.
+  function fart(freq, strength, bright) {
+    if (!ac || ac.state !== 'running') return;
+    const t = ac.currentTime;
+    const dur = (0.22 + 0.5 * strength) * (0.75 + Math.random() * 0.5);
+    const f0 = freq * (1 + (Math.random() - 0.5) * 0.04);
+
+    const osc = ac.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(f0 * 1.2, t);
+    osc.frequency.exponentialRampToValueAtTime(f0, t + 0.05);
+    osc.frequency.exponentialRampToValueAtTime(f0 * (0.62 + Math.random() * 0.2), t + dur);
+
+    const noise = ac.createBufferSource();
+    noise.buffer = noiseBuf;
+    noise.loop = true;
+    const flutter = ac.createBiquadFilter();
+    flutter.type = 'lowpass';
+    flutter.frequency.value = 35;
+    const toPitch = ac.createGain();
+    toPitch.gain.value = f0 * 1.1;
+    noise.connect(flutter);
+    flutter.connect(toPitch);
+    toPitch.connect(osc.frequency);
+
+    const drive = ac.createGain();
+    drive.gain.value = 2.5;
+    const shaper = ac.createWaveShaper();
+    shaper.curve = shaperCurve;
+    const lp = ac.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 5;
+    lp.frequency.setValueAtTime(600 + 1100 * bright, t);
+    lp.frequency.exponentialRampToValueAtTime(240, t + dur);
+
+    const amp = ac.createGain();
+    const peak = 0.35 + 0.4 * strength;
+    amp.gain.setValueAtTime(0.0001, t);
+    amp.gain.exponentialRampToValueAtTime(peak, t + 0.012);
+    amp.gain.setValueAtTime(peak, t + dur * 0.55);
+    amp.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    const sputter = ac.createGain();
+    sputter.gain.value = peak * 2.5;
+    flutter.connect(sputter);
+    sputter.connect(amp.gain);
+
+    // a little air on top
+    const air = ac.createBiquadFilter();
+    air.type = 'bandpass';
+    air.frequency.value = f0 * 5;
+    air.Q.value = 1.5;
+    const airGain = ac.createGain();
+    airGain.gain.value = 0.25;
+    noise.connect(air);
+    air.connect(airGain);
+    airGain.connect(amp);
+
+    osc.connect(drive);
+    drive.connect(shaper);
+    shaper.connect(lp);
+    lp.connect(amp);
+    amp.connect(master);
+
+    osc.start(t);
+    noise.start(t, Math.random() * 1.5);
+    osc.stop(t + dur + 0.05);
+    noise.stop(t + dur + 0.05);
+    osc.onended = () => amp.disconnect();
+  }
+
+  /* ---------- letters ---------- */
+  function seeded(i, salt) {
+    const x = Math.sin((i + 1) * 127.1 + salt * 311.7) * 43758.5453;
+    return x - Math.floor(x);
+  }
+
+  function build() {
+    const size = Math.max(120, Math.min(stage.clientWidth - 14, stage.clientHeight - 14, 720));
+    card.style.width = card.style.height = size + 'px';
+    const inner = card.clientWidth;
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = canvas.width = Math.round(inner * dpr);
+    H = canvas.height = Math.round(inner * dpr);
+
+    const chars = [...input.value.toUpperCase()].filter(c => c.trim());
+    const old = letters;
+    letters = [];
+    if (!chars.length) { draw(); return; }
+
+    const FS = 200;
+    const font = `${FS}px "Titan One", "Arial Rounded MT Bold", Impact, sans-serif`;
+    ctx.font = font;
+    const metrics = chars.map(c => {
+      const m = ctx.measureText(c);
+      return {
+        l: m.actualBoundingBoxLeft, a: m.actualBoundingBoxAscent,
+        w: Math.max(1, m.actualBoundingBoxLeft + m.actualBoundingBoxRight),
+        h: Math.max(1, m.actualBoundingBoxAscent + m.actualBoundingBoxDescent)
+      };
+    });
+    const avg = metrics.reduce((s, m) => s + m.w, 0) / metrics.length;
+    const rel = metrics.map(m => Math.min(1.3, Math.max(0.6, m.w / avg)));
+    const relSum = rel.reduce((s, r) => s + r, 0);
+
+    const pad = W * 0.075;
+    const gap = W * 0.022;
+    const innerW = W - pad * 2 - gap * (chars.length - 1);
+    const innerH = H - pad * 2;
+    const r = Math.max(2, W * 0.008);          // outline thickness
+    const m = Math.ceil(r * 2 + 2);            // margin around each letter bitmap
+    let x = pad;
+
+    chars.forEach((ch, i) => {
+      const cw = innerW * rel[i] / relSum;
+      const chh = innerH * (0.84 + 0.16 * seeded(i, 1));
+      const y = pad + (innerH - chh) * seeded(i, 2);
+      const g = metrics[i];
+      const note = noteFor(ch);
+      const ow = Math.ceil(cw + m * 2), oh = Math.ceil(chh + m * 2);
+
+      const mask = document.createElement('canvas');
+      mask.width = ow; mask.height = oh;
+      const mc = mask.getContext('2d');
+      mc.translate(m, m);
+      mc.scale(cw / g.w, chh / g.h);
+      mc.font = font;
+      mc.fillText(ch, g.l, g.a);
+
+      // outline = the glyph grown by r, minus the glyph itself
+      const outline = document.createElement('canvas');
+      outline.width = ow; outline.height = oh;
+      const oc = outline.getContext('2d');
+      for (let k = 0; k < 24; k++) {
+        const a = k / 24 * Math.PI * 2;
+        oc.drawImage(mask, Math.cos(a) * r, Math.sin(a) * r);
+      }
+      oc.globalCompositeOperation = 'source-in';
+      oc.fillStyle = INK;
+      oc.fillRect(0, 0, ow, oh);
+      oc.globalCompositeOperation = 'destination-out';
+      oc.drawImage(mask, 0, 0);
+
+      const fill = document.createElement('canvas');
+      fill.width = ow; fill.height = oh;
+      const fc = fill.getContext('2d');
+      fc.drawImage(mask, 0, 0);
+      fc.globalCompositeOperation = 'source-in';
+      fc.fillStyle = `hsl(${note.hue} 85% 58%)`;
+      fc.fillRect(0, 0, ow, oh);
+
+      const prev = old[i] && old[i].ch === ch ? old[i] : null;
+      letters.push({
+        ch, note, x, y, w: cw, h: chh, m, ow, oh, outline, fill,
+        disp: prev ? prev.disp : 0, v: prev ? prev.v : 0,
+        py: prev ? prev.py : 0.5, flash: prev ? prev.flash : 0
+      });
+      x += cw + gap;
+    });
+    draw();
+  }
+
+  /* ---------- drawing ---------- */
+  // Bend profile along the letter: zero at both ends, peak where it was plucked.
+  function bend(t, py) {
+    if (t <= 0 || t >= 1) return 0;
+    const u = t < py ? 0.5 * t / py : 0.5 + 0.5 * (t - py) / (1 - py);
+    return Math.sin(Math.PI * u);
+  }
+
+  function draw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const step = Math.max(2, Math.round(dpr * 1.5));
+    for (const L of letters) {
+      const x0 = L.x - L.m, y0 = L.y - L.m;
+      const alpha = 0.14 + 0.86 * L.flash;
+      if (Math.abs(L.disp) < 0.05) {
+        ctx.globalAlpha = alpha;
+        ctx.drawImage(L.fill, x0, y0);
+        ctx.globalAlpha = 1;
+        ctx.drawImage(L.outline, x0, y0);
+        continue;
+      }
+      for (let sy = 0; sy < L.oh; sy += step) {
+        const dx = L.disp * bend((sy + step / 2 - L.m) / L.h, L.py);
+        const sh = Math.min(step, L.oh - sy);
+        ctx.globalAlpha = alpha;
+        ctx.drawImage(L.fill, 0, sy, L.ow, sh, x0 + dx, y0 + sy, L.ow, sh);
+        ctx.globalAlpha = 1;
+        ctx.drawImage(L.outline, 0, sy, L.ow, sh, x0 + dx, y0 + sy, L.ow, sh);
+      }
+    }
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.033, (now - lastT) / 1000 || 0.016);
+    lastT = now;
+    let alive = false;
+    for (const L of letters) {
+      for (let s = 0; s < 4; s++) {
+        const h = dt / 4;
+        L.v += (-K * L.disp - DAMP * L.v) * h;
+        L.disp += L.v * h;
+      }
+      L.flash *= Math.exp(-dt * 2.2);
+      if (Math.abs(L.disp) < 0.05 && Math.abs(L.v) < 2) { L.disp = 0; L.v = 0; }
+      if (L.flash < 0.004) L.flash = 0;
+      if (L.disp || L.v || L.flash) alive = true;
+    }
+    draw();
+    if (alive) requestAnimationFrame(frame);
+    else running = false;
+  }
+  function wake() {
+    if (running) return;
+    running = true;
+    lastT = performance.now();
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------- playing ---------- */
+  function pluck(L, dir, strength, ty) {
+    L.py = Math.min(0.85, Math.max(0.15, ty));
+    const amp = L.w * (0.15 + 0.4 * strength);
+    L.v += dir * OMEGA * amp;
+    const cap = OMEGA * L.w * 0.6;
+    L.v = Math.max(-cap, Math.min(cap, L.v));
+    L.flash = 1;
+    document.documentElement.style.setProperty('--bg', `hsl(${L.note.hue} 82% 62%)`);
+    fart(L.note.freq, strength, 1 - L.py);
+    wake();
+  }
+
+  let last = null;   // previous pointer position in canvas pixels
+  function toCanvas(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * dpr, y: (e.clientY - r.top) * dpr, t: e.timeStamp };
+  }
+  function inColumn(L, y) {
+    return y > L.y - L.h * 0.06 && y < L.y + L.h * 1.06;
+  }
+
+  window.addEventListener('pointermove', e => {
+    const p = toCanvas(e);
+    if (last && p.t - last.t < 250) {
+      const speed = Math.abs(p.x - last.x) / dpr / Math.max(1, p.t - last.t);   // css px per ms
+      const strength = Math.min(1, Math.max(0.15, speed / 2.2));
+      const dir = p.x > last.x ? 1 : -1;
+      const hit = letters.filter(L => {
+        const cx = L.x + L.w / 2;
+        return (last.x - cx) * (p.x - cx) < 0 && inColumn(L, p.y);
+      });
+      if (dir < 0) hit.reverse();
+      for (const L of hit) pluck(L, dir, strength, (p.y - L.y) / L.h);
+    }
+    last = p;
+  });
+
+  card.addEventListener('pointerdown', e => {
+    initAudio();
+    const p = toCanvas(e);
+    last = p;
+    const L = letters.find(L => p.x >= L.x && p.x <= L.x + L.w && inColumn(L, p.y));
+    if (L) pluck(L, p.x < L.x + L.w / 2 ? 1 : -1, 0.6, (p.y - L.y) / L.h);
+  });
+  window.addEventListener('pointerdown', initAudio);
+  window.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') last = null; });
+  window.addEventListener('pointercancel', () => { last = null; });
+
+  // Typing a letter that is in the word plays it too.
+  const turn = {};
+  window.addEventListener('keydown', e => {
+    if (e.target === input || e.metaKey || e.ctrlKey || e.altKey || e.key.length !== 1) return;
+    initAudio();
+    const key = e.key.toUpperCase();
+    const same = letters.filter(L => L.ch === key);
+    if (!same.length) return;
+    turn[key] = ((turn[key] || 0) + 1) % same.length;
+    pluck(same[turn[key]], Math.random() < 0.5 ? 1 : -1, e.repeat ? 0.3 : 0.7, 0.3 + Math.random() * 0.4);
+  });
+
+  input.addEventListener('input', build);
+  new ResizeObserver(build).observe(stage);
+  if (document.fonts && document.fonts.load) {
+    document.fonts.load('200px "Titan One"').then(build, () => {});
+  }
+  build();
+})();
+</script>
+</body>
+</html>
