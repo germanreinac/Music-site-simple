@@ -5,14 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Fart Harp</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Londrina+Solid:wght@900&family=Patrick+Hand&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bungee&family=JetBrains+Mono:wght@500;800&display=swap">
 <style>
-  /* Layout: the word fills the whole screen like harp strings. Two colours only, and they trade places as you play. */
+  /* Layout: the word fills the whole screen like harp strings; one thin mono control line underneath.
+     Two colours at a time. They trade places on every note, and each sound brings its own pair. */
   :root {
-    --bg: #ffffff;              /* swapped with --fg by the script on every pluck */
+    --bg: #ffffff;              /* both set by the script */
     --fg: #e3120b;
-    --display: "Londrina Solid", "Arial Rounded MT Bold", Impact, sans-serif;
-    --hand: "Patrick Hand", "Comic Sans MS", "Segoe Print", cursive;
+    --display: "Bungee", "Arial Black", Impact, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     color-scheme: light;
   }
   html, body { height: 100%; }
@@ -20,14 +21,17 @@
     margin: 0;
     background: var(--bg);
     color: var(--fg);
-    font-family: var(--hand);
-    font-size: 0.95rem;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 0.75rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.2rem;
+    gap: 0.3rem;
     box-sizing: border-box;
-    padding-block: 0.25rem;
+    padding-block: 0.3rem 0.4rem;
     padding-left: max(16px, env(safe-area-inset-left, 0px));
     padding-right: max(16px, env(safe-area-inset-right, 0px));
     overflow: hidden;
@@ -39,8 +43,7 @@
     margin: 0;
     text-align: center;
     text-wrap: balance;
-    line-height: 1.2;
-    min-height: 1.2em;
+    line-height: 1.35;
   }
   #stage {
     flex: 1;
@@ -48,58 +51,75 @@
     width: 100%;
     max-width: 1100px;
     touch-action: none;
-    cursor: crosshair;
+    cursor: grab;
   }
   canvas { display: block; width: 100%; height: 100%; }
-  .word {
+  .bar {
+    width: 100%;
+    max-width: 1100px;
     display: flex;
-    align-items: center;
-    gap: 0.6rem;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
   }
-  .word input {
-    font: inherit;
-    color: var(--fg);
-    background: var(--bg);
-    border: 2px solid var(--fg);
-    border-radius: 0.6rem;
-    padding: 0 0.5rem;
-    width: 9ch;
+  .bar label, .bar .pick { display: flex; align-items: baseline; gap: 0.6em; min-width: 0; }
+  .bar input, .bar button {
+    font-family: inherit;
+    font-weight: 800;
+    font-size: 16px;            /* below 16px an iPhone zooms the page when you type */
+    letter-spacing: 0.12em;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    -webkit-user-select: text;
-    user-select: text;
+    color: var(--fg);
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid var(--fg);
+    border-radius: 0;
+    margin: 0;
+    padding: 0 0 1px;
   }
-  .word input:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
+  .bar input { width: 11ch; -webkit-user-select: text; user-select: text; }
+  .bar button { cursor: pointer; touch-action: manipulation; }
+  .bar input:focus-visible, .bar button:focus-visible { outline: 2px solid var(--fg); outline-offset: 4px; }
 </style>
 </head>
 <body>
-<p id="hint">Tap once for sound. Strum across the letters, or grab one and pull</p>
+<p id="hint">Tap for sound. Strum across, or grab a letter and pull it far</p>
 <div id="stage"><canvas id="harp" aria-label="A word whose letters play like harp strings"></canvas></div>
-<label class="word" for="word-input">Word
-  <input id="word-input" type="text" value="TRUMP" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false">
-</label>
+<div class="bar">
+  <label for="word-input">word
+    <input id="word-input" type="text" value="TRUMP" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false">
+  </label>
+  <span class="pick">sound
+    <button id="sound-btn" type="button" aria-label="Change the sound">FART</button>
+  </span>
+</div>
 
 <script>
 (() => {
-  const WHITE = [255, 255, 255], RED = [227, 18, 11];
   const PENTATONIC = [0, 2, 4, 7, 9];
   // A plucked letter vibrates as a sum of standing waves, like a real string.
   const MODES = [1, 2, 3, 4, 5].map(n => ({
-    n, omega: 2 * Math.PI * 2.6 * n, damp: 1.1 + 0.45 * n
+    n, omega: 2 * Math.PI * 2.6 * n, damp: 1.0 + 0.45 * n
   }));
+  const SHUTTER = 0.05;      // seconds of movement smeared into each frame
 
   const stage = document.getElementById('stage');
   const canvas = document.getElementById('harp');
   const ctx = canvas.getContext('2d');
+  const cur = document.createElement('canvas');      // this frame's letters
+  const cctx = cur.getContext('2d');
+  const trail = document.createElement('canvas');    // fading ghosts of earlier frames
+  const tctx = trail.getContext('2d');
   const hint = document.getElementById('hint');
   const input = document.getElementById('word-input');
+  const soundBtn = document.getElementById('sound-btn');
   const root = document.documentElement;
 
   let letters = [];
   let W = 0, H = 0, dpr = 1;
   let running = false, lastT = 0;
-  let flipped = 0, mix = 0;          // 0 = red word on white, 1 = white word on red
-  let fgNow = RED;
+  let flipped = 0, mix = 0;          // 0 = word in colour b on a, 1 = the other way round
+  let fgNow = [0, 0, 0];
 
   /* ---------- notes ---------- */
   // Each letter of the alphabet owns a note: two octaves of a pentatonic scale.
@@ -168,12 +188,31 @@
     if (awake || !ac || ac.state !== 'running') return;
     awake = true;
     hint.hidden = true;          // give the letters the whole screen
-    fart(130.8, 0.5, 0.6);       // so you can hear that sound is on
+    SOUNDS[mode].play(130.8, 0.5, 0.6);       // so you can hear that sound is on
+  }
+  const ready = () => ac && ac.state === 'running';
+
+  // Volume envelope shared by the simple voices.
+  function env(t, attack, dur, peak) {
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(peak, t + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    g.connect(master);
+    return g;
+  }
+  function voice(type, t, dur, dest) {
+    const o = ac.createOscillator();
+    o.type = type;
+    o.connect(dest);
+    o.start(t);
+    o.stop(t + dur + 0.05);
+    return o;
   }
 
   // A fart: a buzzy low saw that sags in pitch, with noise wobbling its pitch and volume.
   function fart(freq, strength, bright) {
-    if (!ac || ac.state !== 'running') return;
+    if (!ready()) return;
     const t = ac.currentTime + 0.005;
     const dur = (0.25 + 0.5 * strength) * (0.75 + Math.random() * 0.5);
     const f0 = freq * (1 + (Math.random() - 0.5) * 0.04);
@@ -240,6 +279,89 @@
     osc.onended = () => amp.disconnect();
   }
 
+  // A plucked string: bright at the start, mellowing as it rings out.
+  function harp(freq, strength, bright) {
+    if (!ready()) return;
+    const t = ac.currentTime + 0.005, f = freq * 2, dur = 0.9 + 1.3 * strength;
+    const g = env(t, 0.004, dur, 0.3 + 0.35 * strength);
+    const lp = ac.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(f * (4 + 8 * bright), t);
+    lp.frequency.exponentialRampToValueAtTime(f * 1.5, t + dur * 0.6);
+    lp.connect(g);
+    for (const [type, mult, level] of [['triangle', 1, 1], ['sawtooth', 1.003, 0.25], ['sine', 2, 0.3]]) {
+      const lv = ac.createGain();
+      lv.gain.value = level;
+      lv.connect(lp);
+      voice(type, t, dur, lv).frequency.value = f * mult;
+    }
+    setTimeout(() => g.disconnect(), (dur + 0.2) * 1000);
+  }
+
+  // A spring: the pitch wobbles hard, then settles.
+  function boing(freq, strength, bright) {
+    if (!ready()) return;
+    const t = ac.currentTime + 0.005, f = freq * 2, dur = 0.5 + 0.7 * strength;
+    const g = env(t, 0.006, dur, 0.4 + 0.4 * strength);
+    const o = voice('triangle', t, dur, g);
+    o.frequency.setValueAtTime(f * 0.8, t);
+    o.frequency.exponentialRampToValueAtTime(f * 1.3, t + dur);
+    const depth = ac.createGain();
+    depth.gain.setValueAtTime(f * 0.45, t);
+    depth.gain.exponentialRampToValueAtTime(f * 0.01, t + dur);
+    depth.connect(o.frequency);
+    voice('sine', t, dur, depth).frequency.value = 7 + 10 * bright;
+    o.onended = () => g.disconnect();
+  }
+
+  // A toy laser: a square wave falling fast from very high.
+  function pew(freq, strength, bright) {
+    if (!ready()) return;
+    const t = ac.currentTime + 0.005, dur = 0.18 + 0.32 * strength;
+    const g = env(t, 0.003, dur, 0.16 + 0.16 * strength);
+    const o = voice('square', t, dur, g);
+    o.frequency.setValueAtTime(freq * (10 + 10 * bright), t);
+    o.frequency.exponentialRampToValueAtTime(freq * 1.2, t + dur);
+    o.onended = () => g.disconnect();
+  }
+
+  // Each sound brings its own two colours: a = page, b = word (until a note swaps them).
+  const SOUNDS = [
+    { name: 'FART',  a: [255, 255, 255], b: [227, 18, 11],  play: fart },
+    { name: 'HARP',  a: [255, 246, 176], b: [91, 33, 182],  play: harp },
+    { name: 'BOING', a: [255, 214, 232], b: [14, 60, 255],  play: boing },
+    { name: 'PEW',   a: [184, 255, 224], b: [18, 18, 58],   play: pew }
+  ];
+  let mode = 0;
+
+  // The rising whine of a letter being stretched.
+  function whineStart(L) {
+    if (!ready()) return null;
+    const g = ac.createGain();
+    g.gain.value = 0;
+    g.connect(master);
+    const o = ac.createOscillator();
+    o.type = 'triangle';
+    o.frequency.value = L.freq * 2;
+    o.connect(g);
+    o.start();
+    return { o, g };
+  }
+  function whineSet(L, frac) {
+    const w = L.held && L.held.whine;
+    if (!w) return;
+    const t = ac.currentTime;
+    w.o.frequency.setTargetAtTime(L.freq * 2 * (1 + 1.4 * frac), t, 0.03);
+    w.g.gain.setTargetAtTime(0.16 * frac, t, 0.03);
+  }
+  function whineStop(w) {
+    if (!w) return;
+    const t = ac.currentTime;
+    w.g.gain.setTargetAtTime(0, t, 0.015);
+    w.o.stop(t + 0.12);
+    w.o.onended = () => w.g.disconnect();
+  }
+
   /* ---------- letters ---------- */
   function seeded(i, salt) {
     const x = Math.sin((i + 1) * 127.1 + salt * 311.7) * 43758.5453;
@@ -250,16 +372,17 @@
     const cw0 = stage.clientWidth, ch0 = stage.clientHeight;
     if (!cw0 || !ch0) return;
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    W = canvas.width = Math.round(cw0 * dpr);
-    H = canvas.height = Math.round(ch0 * dpr);
+    W = canvas.width = cur.width = trail.width = Math.round(cw0 * dpr);
+    H = canvas.height = cur.height = trail.height = Math.round(ch0 * dpr);
 
     const chars = [...input.value.toUpperCase()].filter(c => c.trim());
     const old = letters;
+    for (const L of old) if (L.held) { whineStop(L.held.whine); L.held = null; }
     letters = [];
-    if (!chars.length) { draw(); return; }
+    if (!chars.length) { draw(0, true); return; }
 
     const FS = 200;
-    const font = `900 ${FS}px "Londrina Solid", "Arial Rounded MT Bold", Impact, sans-serif`;
+    const font = `${FS}px "Bungee", "Arial Black", Impact, sans-serif`;
     ctx.font = font;
     const metrics = chars.map(c => {
       const m = ctx.measureText(c);
@@ -303,27 +426,24 @@
       });
       x += cw + gap;
     });
-    draw();
+    draw(0, true);
   }
 
   /* ---------- drawing ---------- */
-  const SHUTTER = 0.024;   // seconds of movement smeared into each frame
-
-  function draw() {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.clearRect(0, 0, W, H);
-    ctx.globalCompositeOperation = 'lighter';
+  function drawLetters(c) {
+    c.globalCompositeOperation = 'source-over';
+    c.globalAlpha = 1;
+    c.clearRect(0, 0, W, H);
+    c.globalCompositeOperation = 'lighter';
     const step = Math.max(2, Math.round(dpr * 1.5));
     for (const L of letters) {
       const x0 = L.x - L.m, y0 = L.y - L.m;
       const moving = L.mx.some(v => v) || L.mv.some(v => v);
-      if (!moving && !L.held) { ctx.globalAlpha = 1; ctx.drawImage(L.mask, x0, y0); continue; }
-      // faster letters get more smear samples
+      if (!moving && !L.held) { c.globalAlpha = 1; c.drawImage(L.mask, x0, y0); continue; }
+      // fast letters are drawn three times across the distance they covered
       const smear = L.mv.reduce((s, v) => s + Math.abs(v), 0) * SHUTTER;
-      const S = smear < 1.5 * dpr ? 1 : smear < 9 * dpr ? 3 : 5;
-      ctx.globalAlpha = 1 / S;
+      const S = smear < 1.5 * dpr ? 1 : 3;
+      c.globalAlpha = 1 / S;
       const pull = L.held ? L.held.pull : 0, hp = L.held ? L.held.py : 0.5;
       for (let sy = 0; sy < L.oh; sy += step) {
         const t = Math.min(1, Math.max(0, (sy + step / 2 - L.m) / L.h));
@@ -333,27 +453,56 @@
           dx += L.mx[k] * sn;
           vx += L.mv[k] * sn;
         }
+        // like rubber, a letter gets thinner where it is stretched furthest
+        const thin = Math.max(0.3, 1 / (1 + 0.38 * Math.abs(dx) / L.w));
+        const dw = L.ow * thin, xs = x0 + dx + (L.ow - dw) / 2;
         const sh = Math.min(step, L.oh - sy);
         for (let j = 0; j < S; j++) {
           const off = S === 1 ? 0 : vx * SHUTTER * (j / (S - 1) - 0.5);
-          ctx.drawImage(L.mask, 0, sy, L.ow, sh, x0 + dx + off, y0 + sy, L.ow, sh);
+          c.drawImage(L.mask, 0, sy, L.ow, sh, xs + off, y0 + sy, dw, sh);
         }
       }
     }
-    // paint every letter in the current word colour
+    c.globalAlpha = 1;
+  }
+
+  function draw(dt, idle) {
+    drawLetters(cctx);
+
+    // ghosts: the trail canvas keeps earlier frames and lets them fade
+    tctx.globalAlpha = 1;
+    if (idle) {
+      tctx.globalCompositeOperation = 'source-over';
+      tctx.clearRect(0, 0, W, H);
+    } else {
+      tctx.globalCompositeOperation = 'destination-out';
+      tctx.globalAlpha = 1 - Math.exp(-dt * 7);
+      tctx.fillRect(0, 0, W, H);
+      tctx.globalAlpha = 1;
+      tctx.globalCompositeOperation = 'lighter';
+      tctx.drawImage(cur, 0, 0);
+    }
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, W, H);
+    if (!idle) { ctx.globalAlpha = 0.5; ctx.drawImage(trail, 0, 0); ctx.globalAlpha = 1; }
+    ctx.drawImage(cur, 0, 0);
+    // paint everything in the current word colour
     ctx.globalCompositeOperation = 'source-in';
     ctx.fillStyle = `rgb(${fgNow.join(',')})`;
     ctx.fillRect(0, 0, W, H);
   }
 
   function applyColours() {
-    // a pulled string leans the page toward the other colour before it lets go
+    const P = SOUNDS[mode];
+    // a pulled letter leans the page toward the other colour before it lets go
     let tension = 0;
     for (const L of letters) if (L.held) tension = Math.max(tension, Math.abs(L.held.pull) / maxPull(L));
-    const shown = mix + (flipped ? -1 : 1) * 0.38 * tension;
-    const bg = WHITE.map((w, i) => Math.round(w + (RED[i] - w) * shown));
-    fgNow = shown < 0.5 ? RED : WHITE;
+    const shown = mix + (flipped ? -1 : 1) * 0.42 * tension;
+    const bg = P.a.map((a, i) => Math.round(a + (P.b[i] - a) * shown));
+    fgNow = shown < 0.5 ? P.b : P.a;
     root.style.setProperty('--bg', `rgb(${bg.join(',')})`);
     root.style.setProperty('--fg', `rgb(${fgNow.join(',')})`);
   }
@@ -383,11 +532,16 @@
         L.mx[k] = x; L.mv[k] = v;
       }
     }
-    draw();
-    if (alive) requestAnimationFrame(frame);
+    if (alive) { calm = 0; } else calm++;
+    // keep drawing for a moment after everything stops so the ghosts can fade out
+    const idle = calm > 40;
+    draw(dt, idle);
+    if (!idle) requestAnimationFrame(frame);
     else running = false;
   }
+  let calm = 0;
   function wake() {
+    calm = 0;
     if (running) return;
     running = true;
     lastT = performance.now();
@@ -395,33 +549,42 @@
   }
 
   /* ---------- playing ---------- */
-  function maxPull(L) { return Math.max(L.w * 1.15, 44 * dpr); }
+  // A letter can be dragged almost half the screen before it slips off the finger.
+  function maxPull(L) { return Math.max(W * 0.45, L.w * 1.5); }
+  const clampY = (L, y) => Math.min(0.88, Math.max(0.12, (y - L.y) / L.h));
 
   function kick(L, dir, amp, py) {
     for (let k = 0; k < MODES.length; k++) {
       const M = MODES[k];
       const weight = Math.sin(M.n * Math.PI * py) / Math.pow(M.n, 0.45);
-      const cap = M.omega * L.w * 0.55;
+      const cap = M.omega * L.w * 0.7;
       L.mv[k] = Math.max(-cap, Math.min(cap, L.mv[k] + dir * M.omega * amp * weight));
     }
   }
 
-  // Every note: the two colours trade places, the letter farts, its neighbours shiver.
-  function sound(L, dir, strength, py) {
+  // Every note: the two colours trade places, the letter sounds, and a shockwave
+  // rolls outward through the rest of the word.
+  function sound(L, dir, strength, py, shock) {
     flipped = flipped ? 0 : 1;
     const octave = py < 0.33 ? 2 : 1;          // the top third of a letter plays an octave up
-    fart(L.freq * octave, strength, 1 - py);
+    SOUNDS[mode].play(L.freq * octave, strength, 1 - py);
     const i = letters.indexOf(L);
-    for (const N of [letters[i - 1], letters[i + 1]]) {
-      if (N && !N.held) kick(N, dir, N.w * 0.09 * (0.4 + strength), py);
-    }
+    letters.forEach((N, j) => {
+      const d = Math.abs(j - i);
+      if (!d) return;
+      setTimeout(() => {
+        if (N.held || !letters.includes(N)) return;
+        kick(N, dir, N.w * shock / d, py);
+        wake();
+      }, d * 55);
+    });
     wake();
   }
 
   function pluck(L, dir, strength, ty) {
     const py = Math.min(0.88, Math.max(0.12, ty));
-    kick(L, dir, L.w * (0.22 + 0.5 * strength), py);
-    sound(L, dir, strength, py);
+    kick(L, dir, L.w * (0.25 + 0.6 * strength), py);
+    sound(L, dir, strength, py, 0.1 * (0.4 + strength));
   }
 
   // Let go of a pulled letter: its bent shape becomes the starting point of the vibration.
@@ -429,13 +592,15 @@
     const h = L.held;
     if (!h) return;
     L.held = null;
+    whineStop(h.whine);
     if (Math.abs(h.pull) < 5 * dpr) { pluck(L, h.side, 0.6, h.py); return; }
     for (let k = 0; k < MODES.length; k++) {
       const n = MODES[k].n;
       L.mx[k] = h.pull * 2 * Math.sin(n * Math.PI * h.py) / (n * n * Math.PI * Math.PI * h.py * (1 - h.py));
       L.mv[k] = 0;
     }
-    sound(L, h.pull > 0 ? -1 : 1, Math.min(1, 0.25 + 0.75 * Math.abs(h.pull) / maxPull(L)), h.py);
+    const frac = Math.abs(h.pull) / maxPull(L);
+    sound(L, h.pull > 0 ? -1 : 1, Math.min(1, 0.3 + 1.2 * frac), h.py, 0.15 + 1.3 * frac);
   }
 
   const pointers = new Map();   // one entry per finger (or the mouse)
@@ -459,14 +624,16 @@
       if (!L.held) rec.grab = null;
       else {
         L.held.pull = p.x - rec.gx;
-        if (Math.abs(L.held.pull) > maxPull(L)) {      // pulled too far: it slips off the finger
+        L.held.py = clampY(L, p.y);                    // the bend follows the finger up and down
+        const frac = Math.abs(L.held.pull) / maxPull(L);
+        if (frac > 1) {                                // pulled too far: it slips off the finger
           L.held.pull = Math.sign(L.held.pull) * maxPull(L);
           release(L);
           rec.grab = null;
-        } else wake();
-        return;
+        } else { whineSet(L, frac); wake(); }
       }
     }
+    // crossing any letter that is not being held strums it, even while pulling another
     if (last && p.t - last.t < 250) {
       const speed = Math.abs(p.x - last.x) / dpr / Math.max(1, p.t - last.t);   // css px per ms
       const strength = Math.min(1, Math.max(0.15, speed / 2.2));
@@ -480,7 +647,7 @@
     }
   });
 
-  // Press on a letter to grab it, drag sideways to pull it, let go to twang it.
+  // Press on a letter to grab it, drag to pull it, let go to twang it.
   stage.addEventListener('pointerdown', e => {
     const p = toCanvas(e);
     const rec = { last: p, grab: null, gx: p.x };
@@ -488,10 +655,7 @@
     const L = letters.find(L => !L.held && p.x >= L.x && p.x <= L.x + L.w && inColumn(L, p.y));
     if (!L) return;
     L.mx.fill(0); L.mv.fill(0);
-    L.held = {
-      pull: 0, side: p.x < L.x + L.w / 2 ? 1 : -1,
-      py: Math.min(0.88, Math.max(0.12, (p.y - L.y) / L.h))
-    };
+    L.held = { pull: 0, side: p.x < L.x + L.w / 2 ? 1 : -1, py: clampY(L, p.y), whine: whineStart(L) };
     rec.grab = L;
     wake();
   });
@@ -512,10 +676,20 @@
     if (!document.hidden && silentEl && awake) { const p = silentEl.play(); if (p) p.catch(() => {}); }
   });
 
+  // The sound button steps to the next sound and its two colours.
+  soundBtn.addEventListener('click', () => {
+    mode = (mode + 1) % SOUNDS.length;
+    soundBtn.textContent = SOUNDS[mode].name;
+    applyColours();
+    if (awake) SOUNDS[mode].play(130.8, 0.5, 0.6);
+    for (const L of letters) kick(L, Math.random() < 0.5 ? 1 : -1, L.w * 0.25, 0.3 + Math.random() * 0.4);
+    wake();
+  });
+
   // Typing a letter that is in the word plays it too.
   const turn = {};
   window.addEventListener('keydown', e => {
-    if (e.target === input || e.metaKey || e.ctrlKey || e.altKey || e.key.length !== 1) return;
+    if (e.target === input || e.target === soundBtn || e.metaKey || e.ctrlKey || e.altKey || e.key.length !== 1) return;
     const key = e.key.toUpperCase();
     const same = letters.filter(L => L.ch === key);
     if (!same.length) return;
@@ -526,7 +700,7 @@
   input.addEventListener('input', build);
   new ResizeObserver(build).observe(stage);
   if (document.fonts && document.fonts.load) {
-    document.fonts.load('900 200px "Londrina Solid"').then(build, () => {});
+    document.fonts.load('200px "Bungee"').then(build, () => {});
   }
   applyColours();
   build();
