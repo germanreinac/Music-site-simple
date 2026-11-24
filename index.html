@@ -83,11 +83,11 @@
 </style>
 </head>
 <body>
-<p id="hint">Tap for sound. Strum across, or grab a letter and pull it far</p>
+<p id="hint">Tap for sound. Strum soft or fast, or grab a letter and pull</p>
 <div id="stage"><canvas id="harp" aria-label="A word whose letters play like harp strings"></canvas></div>
 <div class="bar">
   <label for="word-input">word
-    <input id="word-input" type="text" value="TRUMP" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false">
+    <input id="word-input" type="text" value="LAME" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false">
   </label>
   <span class="pick">sound
     <button id="sound-btn" type="button" aria-label="Change the sound">FART</button>
@@ -119,6 +119,8 @@
   let W = 0, H = 0, dpr = 1;
   let running = false, lastT = 0;
   let flipped = 0, mix = 0;          // 0 = word in colour b on a, 1 = the other way round
+  let blush = 0;                     // brief lean toward the other colour after a soft note
+  const HARD = 0.6;                  // notes at least this strong swap the colours outright
   let fgNow = [0, 0, 0];
 
   /* ---------- notes ---------- */
@@ -214,7 +216,7 @@
   function fart(freq, strength, bright) {
     if (!ready()) return;
     const t = ac.currentTime + 0.005;
-    const dur = (0.25 + 0.5 * strength) * (0.75 + Math.random() * 0.5);
+    const dur = (0.12 + 0.65 * strength) * (0.75 + Math.random() * 0.5);
     const f0 = freq * (1 + (Math.random() - 0.5) * 0.04);
 
     const osc = ac.createOscillator();
@@ -246,7 +248,7 @@
     lp.frequency.exponentialRampToValueAtTime(450, t + dur);
 
     const amp = ac.createGain();
-    const peak = 0.55 + 0.4 * strength;
+    const peak = 0.1 + 0.85 * strength;
     amp.gain.setValueAtTime(0.0001, t);
     amp.gain.exponentialRampToValueAtTime(peak, t + 0.012);
     amp.gain.setValueAtTime(peak, t + dur * 0.55);
@@ -282,8 +284,8 @@
   // A plucked string: bright at the start, mellowing as it rings out.
   function harp(freq, strength, bright) {
     if (!ready()) return;
-    const t = ac.currentTime + 0.005, f = freq * 2, dur = 0.9 + 1.3 * strength;
-    const g = env(t, 0.004, dur, 0.3 + 0.35 * strength);
+    const t = ac.currentTime + 0.005, f = freq * 2, dur = 0.5 + 1.7 * strength;
+    const g = env(t, 0.004, dur, 0.05 + 0.6 * strength);
     const lp = ac.createBiquadFilter();
     lp.type = 'lowpass';
     lp.frequency.setValueAtTime(f * (4 + 8 * bright), t);
@@ -301,13 +303,13 @@
   // A spring: the pitch wobbles hard, then settles.
   function boing(freq, strength, bright) {
     if (!ready()) return;
-    const t = ac.currentTime + 0.005, f = freq * 2, dur = 0.5 + 0.7 * strength;
-    const g = env(t, 0.006, dur, 0.4 + 0.4 * strength);
+    const t = ac.currentTime + 0.005, f = freq * 2, dur = 0.25 + 0.95 * strength;
+    const g = env(t, 0.006, dur, 0.07 + 0.73 * strength);
     const o = voice('triangle', t, dur, g);
     o.frequency.setValueAtTime(f * 0.8, t);
     o.frequency.exponentialRampToValueAtTime(f * 1.3, t + dur);
     const depth = ac.createGain();
-    depth.gain.setValueAtTime(f * 0.45, t);
+    depth.gain.setValueAtTime(f * (0.08 + 0.45 * strength), t);
     depth.gain.exponentialRampToValueAtTime(f * 0.01, t + dur);
     depth.connect(o.frequency);
     voice('sine', t, dur, depth).frequency.value = 7 + 10 * bright;
@@ -317,8 +319,8 @@
   // A toy laser: a square wave falling fast from very high.
   function pew(freq, strength, bright) {
     if (!ready()) return;
-    const t = ac.currentTime + 0.005, dur = 0.18 + 0.32 * strength;
-    const g = env(t, 0.003, dur, 0.16 + 0.16 * strength);
+    const t = ac.currentTime + 0.005, dur = 0.1 + 0.4 * strength;
+    const g = env(t, 0.003, dur, 0.03 + 0.29 * strength);
     const o = voice('square', t, dur, g);
     o.frequency.setValueAtTime(freq * (10 + 10 * bright), t);
     o.frequency.exponentialRampToValueAtTime(freq * 1.2, t + dur);
@@ -352,7 +354,7 @@
     if (!w) return;
     const t = ac.currentTime;
     w.o.frequency.setTargetAtTime(L.freq * 2 * (1 + 1.4 * frac), t, 0.03);
-    w.g.gain.setTargetAtTime(0.16 * frac, t, 0.03);
+    w.g.gain.setTargetAtTime(0.16 * Math.pow(frac, 1.5), t, 0.03);
   }
   function whineStop(w) {
     if (!w) return;
@@ -500,7 +502,7 @@
     // a pulled letter leans the page toward the other colour before it lets go
     let tension = 0;
     for (const L of letters) if (L.held) tension = Math.max(tension, Math.abs(L.held.pull) / maxPull(L));
-    const shown = mix + (flipped ? -1 : 1) * 0.42 * tension;
+    const shown = mix + (flipped ? -1 : 1) * Math.min(0.45, 0.42 * tension + blush);
     const bg = P.a.map((a, i) => Math.round(a + (P.b[i] - a) * shown));
     fgNow = shown < 0.5 ? P.b : P.a;
     root.style.setProperty('--bg', `rgb(${bg.join(',')})`);
@@ -515,6 +517,10 @@
     if (mix !== flipped) {
       mix += (flipped - mix) * (1 - Math.exp(-dt * 11));
       if (Math.abs(flipped - mix) < 0.004) mix = flipped; else alive = true;
+    }
+    if (blush) {
+      blush *= Math.exp(-dt * 4.5);
+      if (blush < 0.004) blush = 0; else alive = true;
     }
     applyColours();
 
@@ -565,7 +571,8 @@
   // Every note: the two colours trade places, the letter sounds, and a shockwave
   // rolls outward through the rest of the word.
   function sound(L, dir, strength, py, shock) {
-    flipped = flipped ? 0 : 1;
+    if (strength >= HARD) { flipped = flipped ? 0 : 1; blush = 0; }
+    else blush = Math.max(blush, 0.04 + 0.5 * strength);
     const octave = py < 0.33 ? 2 : 1;          // the top third of a letter plays an octave up
     SOUNDS[mode].play(L.freq * octave, strength, 1 - py);
     const i = letters.indexOf(L);
@@ -583,8 +590,8 @@
 
   function pluck(L, dir, strength, ty) {
     const py = Math.min(0.88, Math.max(0.12, ty));
-    kick(L, dir, L.w * (0.25 + 0.6 * strength), py);
-    sound(L, dir, strength, py, 0.1 * (0.4 + strength));
+    kick(L, dir, L.w * (0.03 + 0.85 * strength), py);
+    sound(L, dir, strength, py, 0.3 * strength * strength);
   }
 
   // Let go of a pulled letter: its bent shape becomes the starting point of the vibration.
@@ -593,14 +600,14 @@
     if (!h) return;
     L.held = null;
     whineStop(h.whine);
-    if (Math.abs(h.pull) < 5 * dpr) { pluck(L, h.side, 0.6, h.py); return; }
+    if (Math.abs(h.pull) < 5 * dpr) { pluck(L, h.side, 0.2, h.py); return; }   // a plain tap is a soft note
     for (let k = 0; k < MODES.length; k++) {
       const n = MODES[k].n;
       L.mx[k] = h.pull * 2 * Math.sin(n * Math.PI * h.py) / (n * n * Math.PI * Math.PI * h.py * (1 - h.py));
       L.mv[k] = 0;
     }
     const frac = Math.abs(h.pull) / maxPull(L);
-    sound(L, h.pull > 0 ? -1 : 1, Math.min(1, 0.3 + 1.2 * frac), h.py, 0.15 + 1.3 * frac);
+    sound(L, h.pull > 0 ? -1 : 1, Math.min(1, 0.05 + 1.3 * frac), h.py, 1.4 * Math.pow(frac, 1.5));
   }
 
   const pointers = new Map();   // one entry per finger (or the mouse)
@@ -636,7 +643,7 @@
     // crossing any letter that is not being held strums it, even while pulling another
     if (last && p.t - last.t < 250) {
       const speed = Math.abs(p.x - last.x) / dpr / Math.max(1, p.t - last.t);   // css px per ms
-      const strength = Math.min(1, Math.max(0.15, speed / 2.2));
+      const strength = Math.min(1, Math.max(0.03, speed / 3));
       const dir = p.x > last.x ? 1 : -1;
       const hit = letters.filter(L => {
         const cx = L.x + L.w / 2;
@@ -682,7 +689,7 @@
     soundBtn.textContent = SOUNDS[mode].name;
     applyColours();
     if (awake) SOUNDS[mode].play(130.8, 0.5, 0.6);
-    for (const L of letters) kick(L, Math.random() < 0.5 ? 1 : -1, L.w * 0.25, 0.3 + Math.random() * 0.4);
+    for (const L of letters) kick(L, Math.random() < 0.5 ? 1 : -1, L.w * 0.1, 0.3 + Math.random() * 0.4);
     wake();
   });
 
@@ -694,7 +701,7 @@
     const same = letters.filter(L => L.ch === key);
     if (!same.length) return;
     turn[key] = ((turn[key] || 0) + 1) % same.length;
-    pluck(same[turn[key]], Math.random() < 0.5 ? 1 : -1, e.repeat ? 0.3 : 0.7, 0.2 + Math.random() * 0.6);
+    pluck(same[turn[key]], Math.random() < 0.5 ? 1 : -1, e.repeat ? 0.15 : e.shiftKey ? 1 : 0.4, 0.2 + Math.random() * 0.6);
   });
 
   input.addEventListener('input', build);
